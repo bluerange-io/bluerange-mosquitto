@@ -98,23 +98,23 @@ void* allocate_memory(size_t amount)
 	if(!ret_val)
 	{
 		//We try to free up some memory.
-		_log(LOG_NOTICE, "WARNING: No memory. Trying to clean up...");
+		authLog(LOG_PRIORITY_WARNING, "No memory. Trying to clean up...");
 		//This information might help us to find some memory leak.
 		//Both numbers should be the same.
-		_log(LOG_NOTICE, "Calculated amount of Users: %d, tracked amount of Users: %d", (int)calculate_amount_of_hash_table_users(), amount_of_users);
+		authLog(LOG_PRIORITY_WARNING, "Calculated amount of Users: %d, tracked amount of Users: %d", (int)calculate_amount_of_hash_table_users(), amount_of_users);
 		clean_hash_table(1, 0);
 		ret_val = malloc(amount);
 		if(!ret_val)
 		{
 			//As a last resort we try to free more memory in a more aggressive way.
-			_log(LOG_NOTICE, "WARNING: No memory after clean. Cleaning aggressively...");
+			authLog(LOG_PRIORITY_ERROR, "No memory after clean. Cleaning aggressively...");
 			clean_hash_table(1, 1);
 			ret_val = malloc(amount);
 			if(!ret_val)
 			{
 				//There isn't anything left we can do. Shutting down.
-				_fatal("Out of memory!");
-				exit(1); //Note: _fatal already calls exit. This protects us agains behaviour changes.
+				authLog(LOG_PRIORITY_FATAL, "Out of memory!");
+				exit(1); //Note: LOG_PRIORITY_FATAL already calls exit. This protects us agains behaviour changes.
 			}
 		}
 	}
@@ -169,7 +169,7 @@ User* create_user(cJSON *acl_json, const char* const username, struct mosquitto 
 	if(username_len > 16 * 1024)
 	{
 		//Pure sanity check.
-		_log(LOG_NOTICE, "Received username that exceeded the char limit of 16*1024");
+		authLog(LOG_PRIORITY_WARNING, "Received username that exceeded the char limit of 16*1024");
 		return NULL;
 	}
 	
@@ -223,7 +223,7 @@ void destroy_user(User* user, User* previous_user)
 		const size_t bucket = hash % AMOUNT_OF_HASH_BUCKETS;
 		hash_table_users[bucket] = user->next;
 	}
-	_log(LOG_NOTICE, "Destroying user: %s", user->username ? user->username : "NULL");
+	authLog(LOG_PRIORITY_TRACE, "Destroying user: %s", user->username ? user->username : "NULL");
 	cJSON_Delete(user->acl_json);
 	free(user->username);
 	free(user);
@@ -245,7 +245,7 @@ void clean_hash_table(int force, int panic)
 		{
 			//Poor mans leak detection that might be useful.
 			//These two values should be the same! If they are not it means that some users got lost somehow (memory leak? wrong linked list update?).
-			_log(LOG_NOTICE, "WARNING: Possible leak detected. Calculated: %d, tracked: %d", (int)calculated_amount_of_users, amount_of_users);
+			authLog(LOG_PRIORITY_WARNING, "Possible leak detected. Calculated: %d, tracked: %d", (int)calculated_amount_of_users, amount_of_users);
 		}
 		
 		const time_t now = getTime();
@@ -375,8 +375,6 @@ end:
 
 int mosquitto_auth_plugin_version(void)
 {
-	log_init();
-	
 	return MOSQ_AUTH_PLUGIN_VERSION;
 }
 
@@ -388,10 +386,10 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_opt *auth_opts
 	char* get_user_uri = NULL;
 	int port = 443;
 	int useTLS = 0;
+	setAuthLogPriority(LOG_PRIORITY_INFO);
 	
 	*user_data = NULL; // We don't use user_data.
-	log_init();
-	_log(LOG_NOTICE, "auth-init");
+	authLog(LOG_PRIORITY_TRACE, "auth-init");
 	
 	for (i = 0, o = auth_opts; i < auth_opt_count; i++, o++) {
 		const char* key = o->key;
@@ -426,12 +424,39 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_opt *auth_opts
 			}
 			else
 			{
-				_fatal("Unexpected value for http_with_tls. Only the exact strings \"false\" and \"true\" are supported, but was %s", value);
+				authLog(LOG_PRIORITY_FATAL, "Unexpected value for http_with_tls. Only the exact strings \"false\" and \"true\" are supported, but was %s", value);
+			}
+		}
+		else if (strcmp(key, "log_priority") == 0)
+		{
+			if (strcmp(value, "FATAL") == 0)
+			{
+				setAuthLogPriority(LOG_PRIORITY_FATAL);
+			}
+			else if (strcmp(value, "ERROR") == 0)
+			{
+				setAuthLogPriority(LOG_PRIORITY_ERROR);
+			}
+			else if (strcmp(value, "WARNING") == 0)
+			{
+				setAuthLogPriority(LOG_PRIORITY_WARNING);
+			}
+			else if (strcmp(value, "INFO") == 0)
+			{
+				setAuthLogPriority(LOG_PRIORITY_INFO);
+			}
+			else if (strcmp(value, "TRACE") == 0)
+			{
+				setAuthLogPriority(LOG_PRIORITY_TRACE);
+			}
+			else
+			{
+				authLog(LOG_PRIORITY_FATAL, "Unexpected value for log_prio. Only the exact strings \"FATAL\", \"ERROR\", \"WARNING\", \"INFO\", and \"TRACE\" are supported, but was %s", value);
 			}
 		}
 		else
 		{
-			_log(LOG_NOTICE, "Unrecognized config parameter. [%s]: %s", key ? key : "NULL", value ? value : "NULL");
+			authLog(LOG_PRIORITY_WARNING, "Unrecognized config parameter. [%s]: %s", key ? key : "NULL", value ? value : "NULL");
 		}
 	}
 	
@@ -446,7 +471,7 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_opt *auth_opts
 			hostname,
 			port,
 			get_user_uri);
-		_log(LOG_NOTICE, "Initialized with URL: %s", url);
+		authLog(LOG_PRIORITY_INFO, "Initialized with URL: %s", url);
 		ret_val = MOSQ_ERR_SUCCESS;
 	}
 	
@@ -457,7 +482,7 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_opt *auth_opts
 
 int mosquitto_auth_plugin_cleanup(void* user_data, struct mosquitto_opt* auth_opts, int opt_count)
 {
-	_log(LOG_NOTICE, "Auth Plugin is shutting down.");
+	authLog(LOG_PRIORITY_INFO, "Auth Plugin is shutting down.");
 	size_t i = 0;
 	free(url);
 	
@@ -491,13 +516,13 @@ int mosquitto_auth_acl_check(void* user_data, int access, struct mosquitto* clie
 	const char* username = mosquitto_client_username(client);
 	if(!username)
 	{
-		_log(LOG_NOTICE, "username was NULL!");
+		authLog(LOG_PRIORITY_WARNING, "username was NULL!");
 		return MOSQ_ERR_UNKNOWN;
 	}
 	User* user = get_user(username, NULL);
 	if(!user)
 	{
-		_log(LOG_NOTICE, "Could not find user: %s", username);
+		authLog(LOG_PRIORITY_WARNING, "Could not find user: %s", username);
 		return MOSQ_ERR_UNKNOWN;
 	}
 	user->last_usage_time = getTime();
@@ -517,19 +542,19 @@ int mosquitto_auth_acl_check(void* user_data, int access, struct mosquitto* clie
 	const char* topic = msg->topic;
 	if(!topic)
 	{
-		_log(LOG_NOTICE, "topic was NULL!");
+		authLog(LOG_PRIORITY_WARNING, "topic was NULL!");
 		return MOSQ_ERR_UNKNOWN;
 	}
 
 	if (rws_access == 's' && mosquitto_sub_topic_check(topic) != MOSQ_ERR_SUCCESS)
 	{
-		_log(LOG_NOTICE, "Subscription did not pass topic check. Topic: %s", topic);
+		authLog(LOG_PRIORITY_WARNING, "Subscription did not pass topic check. Topic: %s", topic);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
 	if ((rws_access == 'r' || rws_access == 'w') && mosquitto_pub_topic_check(topic) != MOSQ_ERR_SUCCESS)
 	{
-		_log(LOG_NOTICE, "Read/Write did not pass topic check. Topic: %s", topic);
+		authLog(LOG_PRIORITY_WARNING, "Read/Write did not pass topic check. Topic: %s", topic);
 		return MOSQ_ERR_UNKNOWN;
 	}
 
@@ -552,12 +577,12 @@ int mosquitto_auth_acl_check(void* user_data, int access, struct mosquitto* clie
 			}
 			else
 			{
-				_log(LOG_NOTICE, "ERROR: ACL Entry was malformed. Sub: %s, user: %s", sub, username);
+				authLog(LOG_PRIORITY_ERROR, "ACL Entry was malformed. Sub: %s, user: %s", sub, username);
 				// We continue iterating as other ACL Entries might be correct.
 			}
 		}
 	}
-	_log(LOG_NOTICE, "Not allowed. Topic: %s rws: %c", topic, rws_access);
+	authLog(LOG_PRIORITY_INFO, "Not allowed. Topic: %s rws: %c user: %s", topic, rws_access, username);
 	return MOSQ_ERR_ACL_DENIED;
 }
 
@@ -570,7 +595,7 @@ size_t curl_callback_write(void *contents, size_t size, size_t nmemb, str_with_l
 	if(new_length > 1024 * 1024 * 1024 /*1 GB*/)
 	{
 		//sanity check. ACL lists probably won't be longer than 1 giga byte.
-		_log(LOG_NOTICE, "Received file that exceeded the 1 GB limit.");
+		authLog(LOG_PRIORITY_WARNING, "Received file that exceeded the 1 GB limit.");
 		return 0;
 	}
 	const size_t new_needed_capacity = new_length + 1;
@@ -608,7 +633,7 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 	
 	if(!username || !(*username) || !password || !(*password))
 	{
-		_log(LOG_NOTICE, "Corrupt username or password");
+		authLog(LOG_PRIORITY_WARNING, "Corrupt username or password");
 		return MOSQ_ERR_AUTH;
 	}
 	
@@ -617,14 +642,14 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 	curl = curl_easy_init();
 	if(!curl)
 	{
-		_log(LOG_NOTICE, "Failed to initialize curl");
+		authLog(LOG_PRIORITY_WARNING, "Failed to initialize curl");
 		goto err;
 	}
 	
 	const char *clientid = mosquitto_client_id(client);
 	if(!clientid)
 	{
-		_log(LOG_NOTICE, "Mosquitto did not return a valid clientid");
+		authLog(LOG_PRIORITY_WARNING, "Mosquitto did not return a valid clientid");
 		goto err;
 	}
 	
@@ -633,7 +658,7 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 	const char* escaped_clientid = curl_easy_escape(curl, clientid, 0);
 	if(!escaped_password || !escaped_password || !escaped_clientid)
 	{
-		_log(LOG_NOTICE, "Curl failed to escape username(%s : %s), password(? : ?) or clientid(%s : %s).",
+		authLog(LOG_PRIORITY_WARNING, "Curl failed to escape username(%s : %s), password(? : ?) or clientid(%s : %s).",
 			username ? username : "NULL", escaped_username ? escaped_username : "NULL",
 			//password ? password : "NULL", escaped_password ? escaped_password : "NULL", // Not logging password for security reasons (unknown who has access to the logs).
 			clientid ? clientid : "NULL", escaped_clientid ? escaped_clientid : "NULL");
@@ -691,18 +716,21 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 				goto err;
 			}
 			
-			_log(LOG_NOTICE, "User logged in: %s", username);
-			char* jsonLog = cJSON_Print(json);
-			_log(LOG_NOTICE, "%s", jsonLog ? jsonLog : "Could not load JSON");
-			free(jsonLog);
+			authLog(LOG_PRIORITY_TRACE, "User logged in: %s", username);
+			if (getAuthLogPriority() <= LOG_PRIORITY_TRACE)
+			{
+				char* jsonLog = cJSON_Print(json);
+				authLog(LOG_PRIORITY_TRACE, "%s", jsonLog ? jsonLog : "Could not load JSON");
+				free(jsonLog);
+			}
 			goto end;
 		} else {
-			_log(LOG_NOTICE, "Curl: %d, RespCode: %d", re, respCode);
+			authLog(LOG_PRIORITY_WARNING, "Curl: %d, RespCode: %d", re, respCode);
 			ret_val = MOSQ_ERR_AUTH;
 			goto err;
 		}
 	} else {
-		_log(LOG_NOTICE, "Curl was unable to perform with reason: %d", re);
+		authLog(LOG_PRIORITY_WARNING, "Curl was unable to perform with reason: %d", re);
 		goto err;
 	}
 err:
@@ -736,6 +764,10 @@ void* bootMock()
 		{
 			"http_with_tls",
 			"true"
+		},
+		{
+			"log_priority",
+			"TRACE"
 		}
 	};
 	assert(mosquitto_auth_plugin_version() == MOSQ_AUTH_PLUGIN_VERSION);

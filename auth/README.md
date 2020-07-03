@@ -56,9 +56,10 @@ The special mosquitto topics starting with `$SYS`containing the broker status wi
 
 The auth plugin accepts the following arguments as configuration:
 
-| Argument         | Description                                          | Example                 |
-| ---------------- | ---------------------------------------------------- | ----------------------- |
-| http_port        | The port of the backend                              | 443                     |
-| http_hostname    | The hostname of the backend                          | backend.example.com   |
-| http_getuser_uri | The URI that is called for ACL retrieval upon login. | /mosquitto-auth/getuser |
-| http_with_tls    | If https should be used instead of http              | true                    |
+| Argument         | Description                                                                                                                   | Example                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| http_port        | The port of the backend                                                                                                       | 443                     |
+| http_hostname    | The hostname of the backend                                                                                                   | backend.example.com     |
+| http_getuser_uri | The URI that is called for ACL retrieval upon login.                                                                          | /mosquitto-auth/getuser |
+| http_with_tls    | If https should be used instead of http                                                                                       | true                    |
+| log_priority     | The lowest log priority that is still printed. Possible values: "FATAL", "ERROR", "WARNING", "INFO", "TRACE". Default: "INFO" | WARNING                 |
