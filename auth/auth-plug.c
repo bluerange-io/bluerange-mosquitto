@@ -69,10 +69,20 @@ typedef struct User
 	time_t last_usage_time;
 } User;
 
+typedef struct BlacklistEntry
+{
+	struct BlacklistEntry* next;
+	char* username;
+	char* password;
+	time_t creation_time;
+} BlacklistEntry;
+
 #define AMOUNT_OF_HASH_BUCKETS (1024)
 static User* hash_table_users[AMOUNT_OF_HASH_BUCKETS] = { 0 };
 static char* url = NULL;
 int amount_of_users = 0;
+
+static BlacklistEntry* blacklist = NULL;
 
 void clean_hash_table(int force, int panic);
 
@@ -119,6 +129,92 @@ void* allocate_memory(size_t amount)
 		}
 	}
 	return ret_val;
+}
+
+void remove_blacklist_head()
+{
+	if (!blacklist) return;
+	BlacklistEntry* oldBlacklist = blacklist;
+	blacklist = blacklist->next;
+	free(oldBlacklist->username);
+	free(oldBlacklist->password);
+	free(oldBlacklist);
+}
+
+void remove_blacklist_entries_with_timeout()
+{
+	// The blacklist is always ordered from oldest to newest. This allows us to always
+	// correctly assume that we are removing the first entry, if we remove anything.
+	const time_t currTime = getTime();
+	while (blacklist)
+	{
+		const time_t entryAliveFor = currTime - blacklist->creation_time;
+		if (entryAliveFor > 10)
+		{
+			remove_blacklist_head();
+		}
+		else
+		{
+			return;
+		}
+	}
+}
+
+int is_user_blacklisted(const char* username, const char* password)
+{
+	remove_blacklist_entries_with_timeout();
+	BlacklistEntry* iter = blacklist;
+	while (iter)
+	{
+		if (   strcmp(username, iter->username) == 0
+		    && strcmp(password, iter->password) == 0)
+		{
+			return 1;
+		}
+		iter = iter->next;
+	}
+
+	return 0;
+}
+
+void blacklist_user(const char* username, const char* password)
+{
+	const size_t usernameLength = strlen(username);
+	const size_t passwordLength = strlen(password);
+
+	char* usernameBuffer = allocate_memory(usernameLength + 1);
+	char* passwordBuffer = allocate_memory(passwordLength + 1);
+
+	strcpy(usernameBuffer, username);
+	strcpy(passwordBuffer, password);
+
+	BlacklistEntry* newEntry = allocate_memory(sizeof(BlacklistEntry));
+	newEntry->creation_time = getTime();
+	newEntry->next = NULL;
+	newEntry->password = passwordBuffer;
+	newEntry->username = usernameBuffer;
+
+	if (blacklist == NULL)
+	{
+		blacklist = newEntry;
+	}
+	else
+	{
+		BlacklistEntry* iter = blacklist;
+		while (iter->next)
+		{
+			iter = iter->next;
+		}
+		iter->next = newEntry;
+	}
+}
+
+void clear_blacklist()
+{
+	while (blacklist)
+	{
+		remove_blacklist_head();
+	}
 }
 
 User* get_last_entry(const size_t bucket)
@@ -497,6 +593,8 @@ int mosquitto_auth_plugin_cleanup(void* user_data, struct mosquitto_opt* auth_op
 	memset(hash_table_users, 0, sizeof(hash_table_users));
 	url = NULL;
 	amount_of_users = 0;
+
+	clear_blacklist();
 	
 	return MOSQ_ERR_SUCCESS;
 }
@@ -630,10 +728,16 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 	char* payload_buffer = NULL;
 	CURL *curl = NULL;
 	cJSON *json = NULL;
-	
+
 	if(!username || !(*username) || !password || !(*password))
 	{
 		authLog(LOG_PRIORITY_WARNING, "Corrupt username or password");
+		return MOSQ_ERR_AUTH;
+	}
+
+	if (is_user_blacklisted(username, password))
+	{
+		authLog(LOG_PRIORITY_INFO, "Blacklisted user tried to login: %s", username);
 		return MOSQ_ERR_AUTH;
 	}
 	
@@ -699,12 +803,14 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 			
 			if(!json)
 			{
+				authLog(LOG_PRIORITY_WARNING, "Failed to parse json! %s", payload_buffer);
 				goto err;
 			}
 			cJSON* aclEntries = cJSON_GetObjectItemCaseSensitive(json, "aclEntries");
 			cJSON* superUserEntry = cJSON_GetObjectItemCaseSensitive(json, "superuser");
 			if(!aclEntries || !superUserEntry)
 			{
+				authLog(LOG_PRIORITY_WARNING, "JSON had no aclEntries or superUserEntry %s", payload_buffer);
 				goto err;
 			}
 			
@@ -725,7 +831,10 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 			}
 			goto end;
 		} else {
-			authLog(LOG_PRIORITY_WARNING, "Curl: %d, RespCode: %d", re, respCode);
+			const char* clientAddr = mosquitto_client_address(client);
+			if (!clientAddr) clientAddr = "Could not get addr";
+			authLog(LOG_PRIORITY_WARNING, "Curl: %d, RespCode: %d, username %s, clientid %s, addr %s", re, respCode, username, clientid, clientAddr);
+			blacklist_user(username, password);
 			ret_val = MOSQ_ERR_AUTH;
 			goto err;
 		}
@@ -747,6 +856,7 @@ end:
 void* bootMock()
 {
 	setTime(0);
+	test_set_response_code(200);
 	void* userData = NULL;
 	struct mosquitto_opt opt[] = {
 		{
@@ -804,6 +914,15 @@ void testACL()
 	shutdownMock(userData);
 }
 
+int newMockUser(void* userData, const char* username, const char* password)
+{
+	struct mosquitto mosq;
+	memset(&mosq, 0, sizeof(mosq));
+	mosq.username = username;
+	mosq.password = password;
+	return mosquitto_auth_unpwd_check(&userData, &mosq, username, password);
+}
+
 void userTest(size_t amount)
 {
 	void* userData = bootMock();
@@ -815,11 +934,7 @@ void userTest(size_t amount)
 		char username[128];
 		snprintf(username, sizeof(username), "MOCK_USER%d", i);
 		const char* password = "MOCK_PW";
-		struct mosquitto mosq;
-		memset(&mosq, 0, sizeof(mosq));
-		mosq.username = username;
-		mosq.password = password;
-		assert(mosquitto_auth_unpwd_check(&userData, &mosq, username, password) == MOSQ_ERR_SUCCESS);
+		assert(newMockUser(userData, username, password) == MOSQ_ERR_SUCCESS);
 	}
 
 	shutdownMock(userData);
@@ -833,6 +948,83 @@ void testLotsOfUsers()
 void testFewUsers()
 {
 	userTest(AMOUNT_OF_HASH_BUCKETS / 2);
+}
+
+void testBlacklist()
+{
+	void* userData = bootMock();
+
+	//First we test that a user can login
+	assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_SUCCESS);
+
+	//Next we decline a user
+	test_set_response_code(401);
+	assert(newMockUser(userData, "inval", "pw") == MOSQ_ERR_AUTH);
+
+	//The user is now blacklisted and should return the same...
+	assert(newMockUser(userData, "inval", "pw") == MOSQ_ERR_AUTH);
+
+	//... even if we would return success by the backend (because the user is now blacklisted)
+	test_set_response_code(200);
+	assert(newMockUser(userData, "inval", "pw") == MOSQ_ERR_AUTH);
+
+	//Other users however can still login
+	assert(newMockUser(userData, "happy", "pw") == MOSQ_ERR_SUCCESS);
+
+	//The user is blacklisted for 9 more seconds
+	for (time_t i = 0; i <= 10; i++)
+	{
+		setTime(i);
+		assert(newMockUser(userData, "inval", "pw") == MOSQ_ERR_AUTH);
+	}
+
+	//After 10 seconds the user is free to login again.
+	setTime(11);
+	assert(newMockUser(userData, "inval", "pw") == MOSQ_ERR_SUCCESS);
+
+	//Next we test it with multiple blacklisted users
+	for (int i = 0; i < 5; i++)
+	{
+		setTime(100 + i);
+		char username[128];
+		snprintf(username, sizeof(username), "MOCK_USER%d", i);
+		test_set_response_code(401);
+		assert(newMockUser(userData, username, "MOCK_PW") == MOSQ_ERR_AUTH);
+		snprintf(username, sizeof(username), "MOCK_HAPPY_USER%d", i);
+		test_set_response_code(200);
+		assert(newMockUser(userData, username, "MOCK_PW") == MOSQ_ERR_SUCCESS);
+	}
+
+	//All of them are still blacklisted after 5 seconds.
+	test_set_response_code(200);
+	for (int i = 0; i < 5; i++)
+	{
+		setTime(105 + i);
+		char username[128];
+		snprintf(username, sizeof(username), "MOCK_USER%d", i);
+		assert(newMockUser(userData, username, "MOCK_PW") == MOSQ_ERR_AUTH);
+		snprintf(username, sizeof(username), "MOCK_HAPPY_USERRRR%d", i);
+		assert(newMockUser(userData, username, "MOCK_PW") == MOSQ_ERR_SUCCESS);
+	}
+
+	//But are free to login after 10.
+	test_set_response_code(200);
+	for (int i = 0; i < 5; i++)
+	{
+		setTime(111 + i);
+		char username[128];
+		snprintf(username, sizeof(username), "MOCK_USER%d", i);
+		assert(newMockUser(userData, username, "MOCK_PW") == MOSQ_ERR_SUCCESS);
+		snprintf(username, sizeof(username), "MOCK_HAPPY_USERRRRRRRRR%d", i);
+		assert(newMockUser(userData, username, "MOCK_PW") == MOSQ_ERR_SUCCESS);
+	}
+
+
+	//We block one last user so that the sanitizers check for correct cleanup.
+	test_set_response_code(401);
+	assert(newMockUser(userData, "VeryUnhappyUser", ":(") == MOSQ_ERR_AUTH);
+
+	shutdownMock(userData);
 }
 
 void testMatcher()
@@ -868,6 +1060,7 @@ int main()
 {
 	testMatcher();
 	testACL();
+	testBlacklist();
 	testFewUsers();
 	testLotsOfUsers();
 }

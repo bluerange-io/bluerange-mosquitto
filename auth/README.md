@@ -52,6 +52,12 @@ In case the `superuser` flag is set to true, the client is allowed to read/write
 ## Broker Status
 The special mosquitto topics starting with `$SYS`containing the broker status will be handled by the auth-plugin as exclusiv for superusers.
 
+## Blacklist
+The auth plugin blacklists user/password pairs for 10 seconds if the backend rejects the user. This is done to decrease the load on the backend in cases where users have old passwords and constantly try to connect.
+
+## User hash table
+Users are stored in a hash table. The amount of buckets in that table is constant for a compilation but can be changed by changing the AMOUNT_OF_HASH_BUCKETS define. Each bucket has a linked list of all users that have the same hash value. The hash is generated with djb2 (by Dan Bernstein), based on the username.
+
 ## Configuration
 
 The auth plugin accepts the following arguments as configuration:

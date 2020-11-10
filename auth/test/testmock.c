@@ -57,12 +57,19 @@ void curl_easy_cleanup(CURL * c)
 {
 }
 
+static int responseCode = 200;
+
+void test_set_response_code(int resp)
+{
+	responseCode = resp;
+}
+
 int curl_easy_getinfo(CURL * c, int type, void * data)
 {
 	if (type == CURLINFO_RESPONSE_CODE)
 	{
 		int* iData = (int*)data;
-		*iData = 200;
+		*iData = responseCode;
 		return CURLE_OK;
 	}
 	else
@@ -101,4 +108,9 @@ int mosquitto_sub_topic_check(const char * topic)
 int mosquitto_pub_topic_check(const char * topic)
 {
 	return MOSQ_ERR_SUCCESS;
+}
+
+const char* mosquitto_client_address(const struct mosquitto* client)
+{
+	return "MockedAddr";
 }

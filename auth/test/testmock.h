@@ -63,6 +63,7 @@ const char* curl_easy_escape(CURL* curl, const char*s, int l);
 int curl_easy_setopt(CURL* c, int o, void *p);
 int curl_easy_perform(CURL* c);
 void curl_easy_cleanup(CURL* c);
+void test_set_response_code(int resp);
 int curl_easy_getinfo(CURL* c, int type, void* data);
 
 struct mosquitto
@@ -77,3 +78,4 @@ int mosquitto_topic_matches_sub(const char* sub, const char* topic, bool* result
 const char* mosquitto_client_id(const struct mosquitto* mosq);
 int mosquitto_sub_topic_check(const char* topic);
 int mosquitto_pub_topic_check(const char* topic);
+const char* mosquitto_client_address(const struct mosquitto* client);
