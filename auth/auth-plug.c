@@ -737,7 +737,7 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 
 	if (is_user_blacklisted(username, password))
 	{
-		authLog(LOG_PRIORITY_INFO, "Blacklisted user tried to login: %s", username);
+		authLog(LOG_PRIORITY_TRACE, "Blacklisted user tried to login: %s", username);
 		return MOSQ_ERR_AUTH;
 	}
 	
