@@ -358,7 +358,7 @@ void clean_hash_table(int force, int panic)
 				const time_t time_diff = now - curr_user->last_usage_time;
 				if(time_diff > kill_time)
 				{
-					mosquitto_disconnect(curr_user->mosq);
+					mosquitto_kick_client_by_username(curr_user->username, false);
 					destroy_user(curr_user, prev_user);
 				}
 				else

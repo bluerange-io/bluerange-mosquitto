@@ -84,6 +84,11 @@ int mosquitto_disconnect(struct mosquitto * mosq)
 	return MOSQ_ERR_SUCCESS;
 }
 
+int mosquitto_kick_client_by_username(const char *username, bool with_will)
+{
+	return MOSQ_ERR_SUCCESS;
+}
+
 const char* mosquitto_client_username(struct mosquitto * mosq)
 {
 	return mosq->username;

@@ -73,6 +73,7 @@ struct mosquitto
 };
 
 int mosquitto_disconnect(struct mosquitto* mosq);
+int mosquitto_kick_client_by_username(const char *username, bool with_will);
 const char* mosquitto_client_username(struct mosquitto* mosq);
 int mosquitto_topic_matches_sub(const char* sub, const char* topic, bool* result);
 const char* mosquitto_client_id(const struct mosquitto* mosq);
