@@ -26,15 +26,21 @@
 #include <mosquitto_plugin.h>
 #include <curl/curl.h>
 #else
-#include <assert.h>
 #include "testmock.h"
 #endif
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <inttypes.h>
+
 #include "cJSON.h"
 #include "log.h"
+#include "metrics.h"
+
+#define DEFAULT_MAX_LOGIN_ATTEMPTS_PER_TIMEOUT_PERIOD 6
+#define LOGIN_ATTEMPTS_TIMEOUT_SEC 60
 
 #ifdef AUTH_TEST_ENABLED
 time_t currentTime = 0;
@@ -77,12 +83,23 @@ typedef struct BlacklistEntry
 	time_t creation_time;
 } BlacklistEntry;
 
+typedef struct DuplicatelistEntry
+{
+	struct DuplicatelistEntry* next;
+	char* username;
+	char* password;
+	time_t creation_time;
+	int attempts;
+} DuplicatelistEntry;
+
 #define AMOUNT_OF_HASH_BUCKETS (1024)
 static User* hash_table_users[AMOUNT_OF_HASH_BUCKETS] = { 0 };
 static char* url = NULL;
-int amount_of_users = 0;
+static Metrics metrics = { 0 };
 
 static BlacklistEntry* blacklist = NULL;
+static DuplicatelistEntry* duplicatelist = NULL;
+static int maxLoginAttempts = DEFAULT_MAX_LOGIN_ATTEMPTS_PER_TIMEOUT_PERIOD;
 
 void clean_hash_table(int force, int panic);
 
@@ -111,7 +128,7 @@ void* allocate_memory(size_t amount)
 		authLog(LOG_PRIORITY_WARNING, "No memory. Trying to clean up...");
 		//This information might help us to find some memory leak.
 		//Both numbers should be the same.
-		authLog(LOG_PRIORITY_WARNING, "Calculated amount of Users: %d, tracked amount of Users: %d", (int)calculate_amount_of_hash_table_users(), amount_of_users);
+		authLog(LOG_PRIORITY_WARNING, "Calculated amount of Users: %d, tracked amount of Users: %" PRIuFAST64, (int)calculate_amount_of_hash_table_users(), metrics.logins_user_count);
 		clean_hash_table(1, 0);
 		ret_val = malloc(amount);
 		if(!ret_val)
@@ -139,6 +156,8 @@ void remove_blacklist_head()
 	free(oldBlacklist->username);
 	free(oldBlacklist->password);
 	free(oldBlacklist);
+	assert(metrics.blacklist_length > 0);
+	--metrics.blacklist_length;
 }
 
 void remove_blacklist_entries_with_timeout()
@@ -207,6 +226,8 @@ void blacklist_user(const char* username, const char* password)
 		}
 		iter->next = newEntry;
 	}
+
+	++metrics.blacklist_length;
 }
 
 void clear_blacklist()
@@ -215,6 +236,153 @@ void clear_blacklist()
 	{
 		remove_blacklist_head();
 	}
+	assert(metrics.blacklist_length == 0L);
+}
+
+void remove_duplicatelist_head()
+{
+	if (!duplicatelist) return;
+	DuplicatelistEntry* oldDuplicatelist = duplicatelist;
+	duplicatelist = duplicatelist->next;
+	free(oldDuplicatelist->username);
+	free(oldDuplicatelist->password);
+	free(oldDuplicatelist);
+	assert(metrics.duplicatelist_length > 0);
+	--metrics.duplicatelist_length;
+}
+
+void remove_duplicatelist_user(const char * username)
+{
+	if (!duplicatelist) return;
+
+	DuplicatelistEntry* iter = duplicatelist;
+	DuplicatelistEntry* iterPrevious = NULL;
+
+	while (iter)
+	{
+	  if (strcmp(username, iter->username) == 0)
+	  {
+	    if (iterPrevious == NULL) 
+	    {
+	      duplicatelist = iter->next;
+	    }
+	    else
+	    {
+	      iterPrevious->next = iter->next;
+	    }
+	    free(iter->username);
+	    free(iter->password);
+	    free(iter);
+		assert(metrics.duplicatelist_length > 0);
+		--metrics.duplicatelist_length;
+	    return;
+	  }
+	  iterPrevious = iter;
+	  iter = iter->next;
+	}
+}
+
+void remove_duplicatelist_entries_with_timeout()
+{
+	// The duplicatelist is always ordered from oldest to newest. This allows us to always
+	// correctly assume that we are removing the first entry, if we remove anything.
+	const time_t currTime = getTime();
+	while (duplicatelist)
+	{
+	  const time_t entryAliveFor = currTime - duplicatelist->creation_time;
+	  if (entryAliveFor > LOGIN_ATTEMPTS_TIMEOUT_SEC)
+	  {
+	    remove_duplicatelist_head();
+	  }
+	  else
+	  {
+	    return;
+	  }
+	}
+}
+
+int is_user_duplicatelisted(const char* username, const char* password)
+{
+	remove_duplicatelist_entries_with_timeout();
+	DuplicatelistEntry* iter = duplicatelist;
+	while (iter)
+	{
+	  if (   strcmp(username, iter->username) == 0
+	      && strcmp(password, iter->password) == 0)
+	  {
+	  	if (iter->attempts >= maxLoginAttempts) return 1;
+	    return 0;
+	  }
+	  iter = iter->next;
+	}
+
+	return 0;
+}
+
+bool increase_login_attempts_if_user_exists(const char* username, const char* password)
+{
+	DuplicatelistEntry* iter = duplicatelist;
+	while (iter)
+	{
+	  if (   strcmp(username, iter->username) == 0
+	      && strcmp(password, iter->password) == 0)
+	  {
+	    iter->attempts++;
+	    return true;
+	  }
+	  iter = iter->next;
+	}
+	return false;
+}
+
+void duplicatelist_user_add(const char* username, const char* password)
+{
+	const size_t usernameLength = strlen(username);
+	const size_t passwordLength = strlen(password);
+
+	// Try to find user on duplicatelist and increase number of login attempts
+	if (increase_login_attempts_if_user_exists(username, password))
+	{
+		return;
+	}
+
+	char* usernameBuffer = allocate_memory(usernameLength + 1);
+	char* passwordBuffer = allocate_memory(passwordLength + 1);
+
+	strcpy(usernameBuffer, username);
+	strcpy(passwordBuffer, password);
+
+	DuplicatelistEntry* newEntry = allocate_memory(sizeof(DuplicatelistEntry));
+	newEntry->creation_time = getTime();
+	newEntry->next = NULL;
+	newEntry->password = passwordBuffer;
+	newEntry->username = usernameBuffer;
+	newEntry->attempts = 1;
+
+	if (duplicatelist == NULL)
+	{
+	  duplicatelist = newEntry;
+	}
+	else
+	{
+	  DuplicatelistEntry* iter = duplicatelist;
+	  while (iter->next)
+	  {
+	    iter = iter->next;
+	  }
+	  iter->next = newEntry;
+	}
+
+	++metrics.duplicatelist_length;
+}
+
+void clear_duplicatelist()
+{
+	while (duplicatelist)
+	{
+	  remove_duplicatelist_head();
+	}
+	assert(metrics.duplicatelist_length == 0);
 }
 
 User* get_last_entry(const size_t bucket)
@@ -280,7 +448,7 @@ User* create_user(cJSON *acl_json, const char* const username, struct mosquitto 
 	user->mosq = mosq;
 	
 	store_user_in_hash_table(user);
-	amount_of_users++;
+	++metrics.logins_user_count;
 	
 	return user;
 }
@@ -323,7 +491,8 @@ void destroy_user(User* user, User* previous_user)
 	cJSON_Delete(user->acl_json);
 	free(user->username);
 	free(user);
-	amount_of_users--;
+	assert(metrics.logins_user_count > 0);
+	--metrics.logins_user_count;
 }
 
 void clean_hash_table(int force, int panic)
@@ -337,6 +506,7 @@ void clean_hash_table(int force, int panic)
 		calls = 0;
 		
 		const size_t calculated_amount_of_users = calculate_amount_of_hash_table_users();
+		const size_t amount_of_users = metrics.logins_user_count;
 		if(calculated_amount_of_users != amount_of_users)
 		{
 			//Poor mans leak detection that might be useful.
@@ -550,6 +720,15 @@ int mosquitto_auth_plugin_init(void **user_data, struct mosquitto_opt *auth_opts
 				authLog(LOG_PRIORITY_FATAL, "Unexpected value for log_prio. Only the exact strings \"FATAL\", \"ERROR\", \"WARNING\", \"INFO\", and \"TRACE\" are supported, but was %s", value);
 			}
 		}
+		else if (strcmp(key, "max_login_attempts_per_minute") == 0)
+		{
+			maxLoginAttempts = atoi(value);
+			if (maxLoginAttempts <= 0)
+			{
+				maxLoginAttempts = DEFAULT_MAX_LOGIN_ATTEMPTS_PER_TIMEOUT_PERIOD;
+				authLog(LOG_PRIORITY_ERROR, "Number of max_login_attempts_per_minute is not correct.");
+			}
+		}
 		else
 		{
 			authLog(LOG_PRIORITY_WARNING, "Unrecognized config parameter. [%s]: %s", key ? key : "NULL", value ? value : "NULL");
@@ -592,10 +771,12 @@ int mosquitto_auth_plugin_cleanup(void* user_data, struct mosquitto_opt* auth_op
 
 	memset(hash_table_users, 0, sizeof(hash_table_users));
 	url = NULL;
-	amount_of_users = 0;
+	metrics.logins_user_count = 0;
 
 	clear_blacklist();
-	
+	clear_duplicatelist();
+
+	memset(&metrics, 0, sizeof(metrics));
 	return MOSQ_ERR_SUCCESS;
 }
 
@@ -728,35 +909,43 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 	char* payload_buffer = NULL;
 	CURL *curl = NULL;
 	cJSON *json = NULL;
+	int ret_val = MOSQ_ERR_UNKNOWN;
 
 	if(!username || !(*username) || !password || !(*password))
 	{
 		authLog(LOG_PRIORITY_WARNING, "Corrupt username or password");
-		return MOSQ_ERR_AUTH;
+		ret_val = MOSQ_ERR_AUTH;
+		goto end;
 	}
 
 	if (is_user_blacklisted(username, password))
 	{
 		authLog(LOG_PRIORITY_TRACE, "Blacklisted user tried to login: %s", username);
-		return MOSQ_ERR_AUTH;
+		ret_val = MOSQ_ERR_AUTH;
+		goto end;
 	}
-	
-	int ret_val = MOSQ_ERR_SUCCESS;
+
+	if (is_user_duplicatelisted(username, password))
+	{
+		authLog(LOG_PRIORITY_TRACE, "Duplicatelisted user tried to login: %s", username);
+		ret_val = MOSQ_ERR_CONN_REFUSED;
+		goto end;
+	}
 	
 	curl = curl_easy_init();
 	if(!curl)
 	{
 		authLog(LOG_PRIORITY_WARNING, "Failed to initialize curl");
-		goto err;
+		goto end;
 	}
-	
+
 	const char *clientid = mosquitto_client_id(client);
 	if(!clientid)
 	{
 		authLog(LOG_PRIORITY_WARNING, "Mosquitto did not return a valid clientid");
-		goto err;
+		goto end;
 	}
-	
+
 	const char* escaped_username = curl_easy_escape(curl, username, 0);
 	const char* escaped_password = curl_easy_escape(curl, password, 0);
 	const char* escaped_clientid = curl_easy_escape(curl, clientid, 0);
@@ -766,22 +955,22 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 			username ? username : "NULL", escaped_username ? escaped_username : "NULL",
 			//password ? password : "NULL", escaped_password ? escaped_password : "NULL", // Not logging password for security reasons (unknown who has access to the logs).
 			clientid ? clientid : "NULL", escaped_clientid ? escaped_clientid : "NULL");
-		goto err;
+		goto end;
 	}
-	
+
 	const char* const data_placeholder = "username=%s&password=%s&clientid=%s";
-	
+
 	data = (char *)allocate_memory(strlen(escaped_username) + strlen(escaped_password) + strlen(escaped_clientid) + strlen(data_placeholder) + 1);
 	sprintf(data, data_placeholder,
 		escaped_username,
 		escaped_password,
 		escaped_clientid);
-	
+
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_POST, 1L);
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10);
-	
+
 	str_with_len curl_buffer;
 #define DEFAULT_SIZE (10)
 	curl_buffer.str = allocate_memory(DEFAULT_SIZE);
@@ -791,37 +980,41 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 #undef DEFAULT_SIZE
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_callback_write);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &curl_buffer);
-	
+
+	time_t request_start_time = getTime();
 	int re = curl_easy_perform(curl);
 	int respCode = 0;
 	payload_buffer = curl_buffer.str;
 	if (re == CURLE_OK) {
 		memset(&curl_buffer, 0, sizeof(curl_buffer));
+		metrics_server_request(&metrics, getTime(), request_start_time);
 		re = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &respCode);
 		if (re == CURLE_OK && respCode >= 200 && respCode < 300) {
 			json = cJSON_Parse(payload_buffer);
-			
+
 			if(!json)
 			{
 				authLog(LOG_PRIORITY_WARNING, "Failed to parse json! %s", payload_buffer);
-				goto err;
+				goto end;
 			}
 			cJSON* aclEntries = cJSON_GetObjectItemCaseSensitive(json, "aclEntries");
 			cJSON* superUserEntry = cJSON_GetObjectItemCaseSensitive(json, "superuser");
 			if(!aclEntries || !superUserEntry)
 			{
 				authLog(LOG_PRIORITY_WARNING, "JSON had no aclEntries or superUserEntry %s", payload_buffer);
-				goto err;
+				goto end;
 			}
-			
+
 			destroy_user_if_exists(username);
-			
+
 			User* user = create_user(json, username, client);
 			if(!user)
 			{
-				goto err;
+				goto end;
 			}
-			
+
+			duplicatelist_user_add(username, password);
+
 			authLog(LOG_PRIORITY_TRACE, "User logged in: %s", username);
 			if (getAuthLogPriority() <= LOG_PRIORITY_TRACE)
 			{
@@ -829,6 +1022,8 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 				authLog(LOG_PRIORITY_TRACE, "%s", jsonLog ? jsonLog : "Could not load JSON");
 				free(jsonLog);
 			}
+			json = NULL; // owned by user record
+			ret_val = MOSQ_ERR_SUCCESS;
 			goto end;
 		} else {
 			const char* clientAddr = mosquitto_client_address(client);
@@ -836,19 +1031,29 @@ int mosquitto_auth_unpwd_check(void *userdata, struct mosquitto *client, const c
 			authLog(LOG_PRIORITY_WARNING, "Curl: %d, RespCode: %d, username %s, clientid %s, addr %s", re, respCode, username, clientid, clientAddr);
 			blacklist_user(username, password);
 			ret_val = MOSQ_ERR_AUTH;
-			goto err;
+			goto end;
 		}
 	} else {
 		authLog(LOG_PRIORITY_WARNING, "Curl was unable to perform with reason: %d", re);
-		goto err;
+		goto end;
 	}
-err:
-	if(ret_val == MOSQ_ERR_SUCCESS) ret_val = MOSQ_ERR_UNKNOWN;
-	cJSON_Delete(json);
+
 end:
+	// free all that memory
+	cJSON_Delete(json);
 	free(payload_buffer);
 	free(data);
 	curl_easy_cleanup(curl);
+
+	// evaluate metrics
+	if (ret_val == MOSQ_ERR_SUCCESS) {
+		++metrics.logins_succeeded_count;
+	} else {
+		++metrics.logins_failed_count;
+	}
+	if (curl) { // skipped for safety so that attackers won't flood the $SYS topic
+		metrics_update(&metrics);
+	}
 	return ret_val;
 }
 
@@ -1056,6 +1261,41 @@ void testMatcher()
 	assert(false == matchSubTopic("#", "$SYS/#"));
 }
 
+void testDuplicateLogin()
+{
+	void* userData = bootMock();
+
+	//First we test that a user can login
+	assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_SUCCESS);
+
+	//Next we test that immediate duplicate login attempts will be accepted but maxLoginAttempts-th one will be rejected
+	for (int i = 0; i < maxLoginAttempts - 1; i++)
+	{
+		assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_SUCCESS);
+	}
+	assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_CONN_REFUSED);
+
+	//For LOGIN_ATTEMPTS_TIMEOUT_SEC (60) seconds it should not be possible to log in again
+	for (int i = 0; i <= LOGIN_ATTEMPTS_TIMEOUT_SEC; i++)
+	{
+		setTime(i);
+		assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_CONN_REFUSED);
+	}
+
+	//After LOGIN_ATTEMPTS_TIMEOUT_SEC seconds it should be possible to log in again
+	setTime(LOGIN_ATTEMPTS_TIMEOUT_SEC + 1);
+	assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_SUCCESS);
+
+	//Again we try to login until reaching limit of attempts
+	for (int i = 0; i < maxLoginAttempts - 1; i++)
+	{
+		assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_SUCCESS);
+	}
+	assert(newMockUser(userData, "user", "pw") == MOSQ_ERR_CONN_REFUSED);
+
+	shutdownMock(userData);
+}
+
 int main()
 {
 	testMatcher();
@@ -1063,5 +1303,6 @@ int main()
 	testBlacklist();
 	testFewUsers();
 	testLotsOfUsers();
+	testDuplicateLogin();
 }
 #endif

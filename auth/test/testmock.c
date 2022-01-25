@@ -15,8 +15,10 @@
 */
 
 #include "testmock.h"
+#include "log.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef size_t curlCallbackFunc(void*, size_t, size_t, void*);
 
@@ -118,4 +120,16 @@ int mosquitto_pub_topic_check(const char * topic)
 const char* mosquitto_client_address(const struct mosquitto* client)
 {
 	return "MockedAddr";
+}
+
+int mosquitto_broker_publish_copy(
+		const char *clientid,
+		const char *topic,
+		int payloadlen,
+		const void *payload,
+		int qos,
+		bool retain,
+		mosquitto_property *properties)
+{
+	authLog(LOG_PRIORITY_TRACE, "%s=%-.*s\n", topic, payloadlen, payload);
 }

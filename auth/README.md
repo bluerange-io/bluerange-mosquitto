@@ -69,3 +69,4 @@ The auth plugin accepts the following arguments as configuration:
 | http_getuser_uri | The URI that is called for ACL retrieval upon login.                                                                          | /mosquitto-auth/getuser |
 | http_with_tls    | If https should be used instead of http                                                                                       | true                    |
 | log_priority     | The lowest log priority that is still printed. Possible values: "FATAL", "ERROR", "WARNING", "INFO", "TRACE". Default: "INFO" | WARNING                 |
+| max_login_attempts_per_minute | Defines how many times per minute user can use his credentials to log in. After exceeding number of attempts user won't be able to log in even after providing correct credentials for a minute, counting from first attempt. Only positive values are accepted. | 6 |

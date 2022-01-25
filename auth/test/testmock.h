@@ -21,6 +21,7 @@
 #define MOSQ_ERR_UNKNOWN 2
 #define MOSQ_ERR_ACL_DENIED 3
 #define MOSQ_ERR_AUTH 4
+#define MOSQ_ERR_CONN_REFUSED 5
 
 #define MOSQ_ACL_READ 1000
 #define MOSQ_ACL_WRITE 1001
@@ -71,6 +72,7 @@ struct mosquitto
 	const char* username;
 	const char* password;
 };
+typedef void* mosquitto_property; // opaque not used
 
 int mosquitto_disconnect(struct mosquitto* mosq);
 int mosquitto_kick_client_by_username(const char *username, bool with_will);
@@ -80,3 +82,11 @@ const char* mosquitto_client_id(const struct mosquitto* mosq);
 int mosquitto_sub_topic_check(const char* topic);
 int mosquitto_pub_topic_check(const char* topic);
 const char* mosquitto_client_address(const struct mosquitto* client);
+int mosquitto_broker_publish_copy(
+		const char *clientid,
+		const char *topic,
+		int payloadlen,
+		const void *payload,
+		int qos,
+		bool retain,
+		mosquitto_property *properties);
